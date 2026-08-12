@@ -247,23 +247,57 @@
   function nowTime(){ var d=new Date(); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 
   // ---- photo pipeline ----
-  function shrink(file){
+  function readAsDataURL(file){
+    return new Promise(function(res,rej){
+      var fr = new FileReader();
+      fr.onload = function(){ res(fr.result); };
+      fr.onerror = function(){ rej(new Error('Could not open that file.')); };
+      fr.readAsDataURL(file);
+    });
+  }
+
+  function loadImage(src){
     return new Promise(function(res,rej){
       var img = new Image();
-      img.onload = function(){
-        var max=1024, w=img.width, h=img.height;
-        if(w>h && w>max){ h=h*max/w; w=max; } else if(h>max){ w=w*max/h; h=max; }
-        var c=document.createElement('canvas'); c.width=w; c.height=h;
-        c.getContext('2d').drawImage(img,0,0,w,h);
-        var full = c.toDataURL('image/jpeg',.8);
-        var tc=document.createElement('canvas'); tc.width=132; tc.height=132;
-        var s=Math.min(img.width,img.height);
-        tc.getContext('2d').drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,0,0,132,132);
-        res({ b64: full.split(',')[1], thumb: tc.toDataURL('image/jpeg',.6) });
-      };
-      img.onerror = function(){ rej(new Error('Could not read that image')); };
-      img.src = URL.createObjectURL(file);
+      img.onload = function(){ res(img); };
+      img.onerror = function(){ rej(new Error('decode')); };
+      img.src = src;
     });
+  }
+
+  function draw(src){
+    var max=1024, w=src.width, h=src.height;
+    if(!w || !h) throw new Error('decode');
+    if(w>h && w>max){ h=Math.round(h*max/w); w=max; } else if(h>max){ w=Math.round(w*max/h); h=max; }
+    var c=document.createElement('canvas'); c.width=w; c.height=h;
+    c.getContext('2d').drawImage(src,0,0,w,h);
+    var full = c.toDataURL('image/jpeg',.8);
+    var tc=document.createElement('canvas'); tc.width=132; tc.height=132;
+    var s=Math.min(src.width,src.height);
+    tc.getContext('2d').drawImage(src,(src.width-s)/2,(src.height-s)/2,s,s,0,0,132,132);
+    return { b64: full.split(',')[1], thumb: tc.toDataURL('image/jpeg',.6) };
+  }
+
+  async function shrink(file){
+    var heic = /heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name||'');
+
+    // path 1: standard decode from a data URL
+    try{
+      var url = await readAsDataURL(file);
+      var img = await loadImage(url);
+      return draw(img);
+    }catch(e){}
+
+    // path 2: createImageBitmap, which handles some formats the img tag will not
+    try{
+      if(window.createImageBitmap){
+        var bmp = await createImageBitmap(file);
+        return draw(bmp);
+      }
+    }catch(e){}
+
+    if(heic) throw new Error('That is a HEIC photo and this cannot read it. On iPhone: Settings > Camera > Formats > Most Compatible, then retake. Or screenshot the photo and upload the screenshot.');
+    throw new Error('Could not read that image. Try a screenshot of it, or a JPG.');
   }
 
   var PROMPT = "You are estimating the calorie and protein content of a meal from a photo, for a 172cm male in his 20s doing a slow fat-loss phase alongside heavy training.\n\nContext that matters for accuracy: he eats Fijian Indian home cooking. It is mild, not heavily spiced, and cooked with very little oil. Curry is uncommon. Typical meals are rice or roti with chicken, lamb or fish and vegetables, usually in a 400-500ml container. Do not assume ghee-heavy or oil-heavy preparation unless the photo clearly shows it (visible oil pooling, glossy sheen, deep-fried texture).\n\nEstimate the whole portion visible. Use containers, cutlery and hands for scale where present.\n\nRespond with ONLY a JSON object, no markdown fences and no preamble:\n{\"name\":\"short plain name of the meal, max 6 words\",\"kcal\":number,\"protein\":number,\"note\":\"one short sentence, max 18 words: the main thing driving the number, or what you could not see\"}\n\nIf the photo contains no food at all, return {\"name\":\"No food found\",\"kcal\":0,\"protein\":0,\"note\":\"That photo does not show a meal.\"}";
@@ -285,7 +319,11 @@
           ]}]
         })
       });
-      if(!r.ok) throw new Error('Request failed ('+r.status+'). Try again.');
+      if(!r.ok){
+        var detail = '';
+        try{ var ej = await r.json(); detail = (ej.error && ej.error.message) ? ' — '+ej.error.message : ''; }catch(e2){}
+        throw new Error('The estimate request failed ('+r.status+')'+detail);
+      }
       var data = await r.json();
       var txt = data.content.filter(function(b){return b.type==='text'}).map(function(b){return b.text}).join('');
       var clean = txt.replace(/```json/g,'').replace(/```/g,'').trim();
